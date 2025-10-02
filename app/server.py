@@ -1,17 +1,54 @@
-
 from __future__ import annotations
-import io, os, time, tempfile, pathlib
+import io, os
 from typing import Optional
-from fastapi import FastAPI, Form, Response
+from fastapi import FastAPI, Form, Response, Request
 from PIL import Image
 import numpy as np
 
 from app.pipeline.diffsplat_wrapper import DiffSplatWrapper
 from app.pipeline.clip_validator import clip_score
 from app.utils.io import save_zip
+from app.utils.logging import get_logger, new_request_id, time_block
 
 app = FastAPI(title="DiffSplat Generation Service", version="0.2.0")
 _state = {"clip_model": None, "clip_proc": None, "gen": None}
+
+logger = get_logger("server")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    rid = request.headers.get("x-request-id") or new_request_id()
+    done = time_block()
+    try:
+        response = await call_next(request)
+        logger.info(
+            "http",
+            extra={
+                "extra": {
+                    "rid": rid,
+                    "path": request.url.path,
+                    "status": getattr(response, "status_code", None),
+                    "latency_s": done(),
+                }
+            },
+        )
+        response.headers["x-request-id"] = rid
+        return response
+    except Exception as e:
+        logger.error(
+            "http_error",
+            extra={
+                "extra": {
+                    "rid": rid,
+                    "path": request.url.path,
+                    "err": str(e),
+                    "latency_s": done(),
+                }
+            },
+        )
+        raise
+
 
 def _ensure_init():
     if _state["gen"] is None:
@@ -21,9 +58,14 @@ def _ensure_init():
         try:
             from transformers import CLIPProcessor, CLIPModel
             import torch
+
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            _state["clip_model"] = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
-            _state["clip_proc"] = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+            _state["clip_model"] = CLIPModel.from_pretrained(
+                "openai/clip-vit-base-patch32"
+            ).to(device)
+            _state["clip_proc"] = CLIPProcessor.from_pretrained(
+                "openai/clip-vit-base-patch32"
+            )
         except Exception:
             _state["clip_model"] = None
             _state["clip_proc"] = None
@@ -37,9 +79,11 @@ def generate(
     timeout_s: Optional[float] = Form(28.0),
 ):
     _ensure_init()
-    t0 = time.time()
+    rid = new_request_id()
     try:
-        out = _state["gen"].text_to_splat(prompt=prompt, seed=seed, timeout_s=float(timeout_s or 28.0))
+        out = _state["gen"].text_to_splat(
+            prompt=prompt, seed=seed, timeout_s=float(timeout_s or 28.0)
+        )
         cover = out["cover"]
         ply_bytes = out.get("ply") or b""
     except Exception as e:
@@ -47,24 +91,41 @@ def generate(
         return Response(content=b"", media_type="application/octet-stream")
 
     # Lightweight validation (best-effort)
-    score = clip_score(_state["clip_model"], _state["clip_proc"], prompt, cover.convert("RGB"))
+    score = clip_score(
+        _state["clip_model"], _state["clip_proc"], prompt, cover.convert("RGB")
+    )
+
+    done = time_block()
     if score < 0.12 or not ply_bytes:
         # Empty to avoid cooldown penalties on low quality or missing geometry
+        logger.info(
+            "generate_filtered",
+            extra={
+                "extra": {
+                    "rid": rid,
+                    "prompt": prompt[:100],
+                    "score": score,
+                    "bytes": len(ply_bytes),
+                }
+            },
+        )
         return Response(content=b"", media_type="application/octet-stream")
 
     # Stream raw PLY bytes (or .splat) directly
+    logger.info(
+        "generate_ok",
+        extra={
+            "extra": {
+                "rid": rid,
+                "prompt": prompt[:100],
+                "score": score,
+                "bytes": len(ply_bytes),
+                "latency_s": done(),
+            }
+        },
+    )
     return Response(content=ply_bytes, media_type="application/octet-stream")
 
-
-    score = clip_score(_state["clip_model"], _state["clip_proc"], prompt, cover.convert("RGB"))
-    if score < 0.12:
-        meta = {"prompt": prompt, "error": "low_quality", "clip_score": score, "elapsed_s": round((time.time()-t0),3)}
-        z = save_zip(cover, b"", meta)
-        return Response(content=z, media_type="application/zip")
-
-    meta = {"prompt": prompt, "neg_prompt": neg_prompt, "seed": seed, "clip_score": score, "elapsed_s": round((time.time()-t0),3), "ts": int(time.time())}
-    z = save_zip(cover, ply_bytes, meta)
-    return Response(content=z, media_type="application/zip")
 
 @app.post("/generate_video/")
 def generate_video(
@@ -73,30 +134,66 @@ def generate_video(
     seed: Optional[int] = Form(None),
     timeout_s: Optional[float] = Form(28.0),
 ):
+    rid = new_request_id()
     _ensure_init()
     try:
-        out = _state["gen"].text_to_splat(prompt=prompt, seed=seed, timeout_s=float(timeout_s or 28.0))
+        out = _state["gen"].text_to_splat(
+            prompt=prompt, seed=seed, timeout_s=float(timeout_s or 28.0)
+        )
+        done = time_block()
+
         mp4_bytes = out.get("mp4")
         if not mp4_bytes:
             # synthesize a tiny mp4 if upstream didn't emit one
             import imageio
-            frames = [(np.zeros((256,256,3), dtype=np.uint8)) for _ in range(12)]
+
+            frames = [(np.zeros((256, 256, 3), dtype=np.uint8)) for _ in range(12)]
             buf = io.BytesIO()
             imageio.mimwrite(buf, frames, format="mp4", fps=12)
             mp4_bytes = buf.getvalue()
+
+            logger.info(
+                "generate_filtered",
+                extra={
+                    "extra": {
+                        "rid": rid,
+                        "prompt": prompt[:100],
+                    }
+                },
+            )
+        else:
+            logger.info(
+                "generate_ok",
+                extra={
+                    "extra": {
+                        "rid": rid,
+                        "prompt": prompt[:100],
+                        "latency_s": done(),
+                    }
+                },
+            )
         return Response(content=mp4_bytes, media_type="video/mp4")
     except Exception:
         # return 1s black
         import imageio
-        frames = [(np.zeros((256,256,3), dtype=np.uint8)) for _ in range(12)]
+
+        frames = [(np.zeros((256, 256, 3), dtype=np.uint8)) for _ in range(12)]
         buf = io.BytesIO()
         imageio.mimwrite(buf, frames, format="mp4", fps=12)
         return Response(content=buf.getvalue(), media_type="video/mp4")
 
+
 if __name__ == "__main__":
     import argparse, uvicorn
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8093)
     args = parser.parse_args()
-    uvicorn.run("app.server:app", host=args.host, port=args.port, reload=False, workers=int(os.environ.get("UVICORN_WORKERS","1")))
+    uvicorn.run(
+        "app.server:app",
+        host=args.host,
+        port=args.port,
+        reload=False,
+        workers=int(os.environ.get("UVICORN_WORKERS", "1")),
+    )
