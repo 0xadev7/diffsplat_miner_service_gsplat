@@ -1,0 +1,43 @@
+name: three-gen-mining
+channels:
+  - nvidia/label/cuda-12.1.1
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.10
+  - cudatoolkit=12.1
+  - pytorch=2.3.*
+  - pytorch-cuda=12.1
+  - pip
+  - ffmpeg
+  - pip:
+      - fastapi==0.115.0
+      - uvicorn==0.30.6
+      - pydantic==2.9.2
+      - pillow==10.4.0
+      - numpy==1.26.4
+      - scipy==1.11.4
+      - imageio[ffmpeg]==2.34.1
+      - open3d==0.18.0
+      - trimesh==4.4.9
+      - pyquaternion==0.9.9
+      - tqdm==4.66.5
+      - torchmetrics==1.4.0.post0
+      - opencv-python-headless==4.10.0.84
+      - open-clip-torch==2.24.0
+      - huggingface-hub==0.25.2
+      - safetensors==0.4.5
+      - omegaconf==2.3.0
+      - einops==0.8.0
+      - aiofiles==23.2.1
+      - python-multipart==0.0.9
+      - loguru==0.7.2
+      - rich==13.9.2
+      - diffusers==0.30.3
+      - transformers==4.43.3
+      - pyav==12.2.0
+      # gsplat stack (JIT builds CUDA on import)
+      - gsplat==1.5.3
+      - plyfile==1.0.3
+      - ninja==1.11.1.1
+      - jaxtyping==0.2.33
