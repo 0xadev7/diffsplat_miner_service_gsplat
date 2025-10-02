@@ -15,8 +15,8 @@ class DiffSplatWrapper:
 
     def _infer_entry(self):
         # Prefer scripts/infer.sh if present
-        sh = os.path.join(self.repo_dir, "scripts", "infer.sh")
-        if os.path.isfile(sh):
+        sh = os.path.join("scripts", "infer.sh")
+        if os.path.isfile(os.path.join(self.repo_dir, sh)):
             return ("sh", [sh])
         # Else choose python module based on variant
         mapping = {
@@ -51,7 +51,7 @@ class DiffSplatWrapper:
             ]
             if seed is not None:
                 cmd += ["--seed", str(seed)]
-            run_cwd = ""
+            run_cwd = self.repo_dir
         else:
             # python -m src.infer_gsdiff_* --prompt "..." --out out_dir --mp4 --ply
             cmd = (
