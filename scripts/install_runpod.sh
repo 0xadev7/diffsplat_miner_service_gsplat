@@ -6,8 +6,8 @@ set -euo pipefail
 # (excluding torch). It is idempotent.
 
 echo "[install] Updating apt packages..."
-sudo apt-get update -y
-sudo apt-get install -y --no-install-recommends \
+apt-get update -y
+apt-get install -y --no-install-recommends \
   git cmake build-essential ffmpeg libgl1 libglib2.0-0 libeigen3-dev libglm-dev
 
 # Python deps (no torch here, rely on pod)
