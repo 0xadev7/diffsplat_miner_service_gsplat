@@ -1,15 +1,14 @@
 name: three-gen-mining
 channels:
-  - nvidia/label/cuda-12.1.1
   - pytorch
+  - nvidia
   - conda-forge
 dependencies:
   - python=3.10
-  - cudatoolkit=12.1
   - pytorch=2.3.*
-  - pytorch-cuda=12.1
-  - pip
+  - pytorch-cuda=12.1  # pulls compatible CUDA runtime (cuBLAS, etc.) from nvidia channel
   - ffmpeg
+  - pip
   - pip:
       - fastapi==0.115.0
       - uvicorn==0.30.6
@@ -36,7 +35,6 @@ dependencies:
       - diffusers==0.30.3
       - transformers==4.43.3
       - pyav==12.2.0
-      # gsplat stack (JIT builds CUDA on import)
       - gsplat==1.5.3
       - plyfile==1.0.3
       - ninja==1.11.1.1
