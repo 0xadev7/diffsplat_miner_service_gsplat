@@ -17,7 +17,7 @@ class DiffSplatWrapper:
         # Prefer scripts/infer.sh if present
         sh = os.path.join("scripts", "infer.sh")
         if os.path.isfile(os.path.join(self.repo_dir, sh)):
-            return ("sh", [sh])
+            return ("sh", ["bash", sh])
         # Else choose python module based on variant
         mapping = {
             "sd15": "src.infer_gsdiff_sd",
