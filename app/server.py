@@ -87,7 +87,7 @@ def generate(
         cover = out["cover"]
         ply_bytes = out.get("ply") or b""
     except Exception as e:
-        logger.error("generate_error", e)
+        logger.error("generate_error", extra={"extra": {"stderr": e}})
         # Return empty byte stream to be ignored by validators
         return Response(content=b"", media_type="application/octet-stream")
 

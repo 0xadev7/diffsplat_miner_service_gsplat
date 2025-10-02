@@ -15,7 +15,7 @@ class DiffSplatWrapper:
 
     def _infer_entry(self):
         # Prefer scripts/infer.sh if present
-        sh = os.path.join(self.repo_dir, "scripts", "infer.sh")
+        sh = os.path.join("scripts", "infer.sh")
         if os.path.isfile(sh):
             return ("sh", [sh])
         # Else choose python module based on variant
@@ -63,7 +63,10 @@ class DiffSplatWrapper:
                 cmd += ["--seed", str(seed)]
             run_cwd = self.repo_dir
 
-        self.logger.info("infer_start", extra={"extra": {"cmd": cmd[:3] + ["..."]}})
+        self.logger.info(
+            "infer_start",
+            extra={"extra": {"cmd": cmd[:3] + ["..."], "run_cwd": run_cwd}},
+        )
 
         done = time_block()
         try:
@@ -72,15 +75,12 @@ class DiffSplatWrapper:
                 "infer_ok",
                 extra={
                     "extra": {
-                        "cmd": cmd[:3] + ["..."],
                         "elapsed_s": done(),
                     }
                 },
             )
         except subprocess.TimeoutExpired:
-            self.logger.error(
-                "infer_timeout", extra={"extra": {"cmd": cmd[:3] + ["..."]}}
-            )
+            self.logger.error("infer_timeout")
             shutil.rmtree(work, ignore_errors=True)
             raise RuntimeError("DiffSplat timeout")
         except subprocess.CalledProcessError as e:
