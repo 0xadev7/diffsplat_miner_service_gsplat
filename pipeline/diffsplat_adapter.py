@@ -1,10 +1,7 @@
-import os, time, numpy as np, io, json
+import os, sys, time, numpy as np
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
-from PIL import Image
 from loguru import logger
-
-from .utils import rng_from_seed
 
 @dataclass
 class GenerationOutput:
@@ -13,11 +10,39 @@ class GenerationOutput:
     num_points: int
     timings: Dict[str, float]
 
+def _find_diffsplat_root() -> Optional[str]:
+    """
+    Locate the DiffSplat repo so that `import src.*` works.
+    Priority:
+      1) DIFFSPLAT_PATH environment variable
+      2) ../DiffSplat relative to project root
+      3) ./DiffSplat inside this project
+      4) /workspace/DiffSplat (common in containers)
+      5) /root/DiffSplat
+    """
+    from pathlib import Path
+    env = os.getenv("DIFFSPLAT_PATH")
+    cand = []
+    if env:
+        cand.append(Path(env))
+    here = Path(__file__).resolve()
+    proj_root = here.parents[2]
+    cand += [
+        proj_root.parent / "DiffSplat",
+        proj_root / "DiffSplat",
+        Path("/workspace/DiffSplat"),
+        Path("/root/DiffSplat"),
+    ]
+    for p in cand:
+        if p and p.exists() and (p / "src").exists():
+            return str(p)
+    return None
+
 class DiffSplatGenerator:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.model_variant = config["generation"]["model_variant"]
-        self.device_str = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES", "") != "" or os.environ.get("FORCE_CUDA","") else "auto"
+        self.device_str = "cuda" if (os.environ.get("CUDA_VISIBLE_DEVICES") or os.environ.get("FORCE_CUDA")) else "auto"
         self._warm = False
         if config["generation"].get("warmup_on_start", True):
             try:
@@ -27,11 +52,16 @@ class DiffSplatGenerator:
                 logger.warning(f"Warmup skipped: {e}")
 
     def _ensure_imports(self):
-        import sys, pathlib
-        root = pathlib.Path(__file__).resolve().parents[2]
-        diffsplat = root.parent / "DiffSplat"
-        if diffsplat.exists():
-            sys.path.insert(0, str(diffsplat))
+        root = _find_diffsplat_root()
+        if not root:
+            raise ImportError(
+                "Could not locate DiffSplat repo. "
+                "Set DIFFSPLAT_PATH=/path/to/DiffSplat (folder containing 'src') "
+                "or clone it next to this project as '../DiffSplat'."
+            )
+        if root not in sys.path:
+            sys.path.insert(0, root)
+
         from src.pipelines import build_text_pipeline  # type: ignore
         from src.utils.ply_utils import write_ply_bytes  # type: ignore
         from src.utils.camera_utils import get_default_camera  # type: ignore
@@ -46,13 +76,11 @@ class DiffSplatGenerator:
         self._warm = True
 
     async def generate(self, prompt: str, seed: Optional[int] = None) -> GenerationOutput:
+        from .utils import rng_from_seed
         self._ensure_imports()
         r, seed = rng_from_seed(seed)
         t0 = time.time()
-
         pipe = self._build_text_pipeline(self.model_variant)
-
-        # NOTE: Replace with the correct API as needed
         result = pipe.generate(prompt=prompt, seed=seed, steps=8)
         t2 = time.time()
 
