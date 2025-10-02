@@ -26,7 +26,7 @@ fi
 
 echo "[+] Installing DiffSplat deps & ckpts ..."
 pushd ../DiffSplat >/dev/null
-pip install -r requirements.txt || true
+bash settings/setup.sh || true
 python ./download_ckpt.py || true
 popd >/dev/null
 
