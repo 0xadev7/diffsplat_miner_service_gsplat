@@ -63,6 +63,8 @@ class DiffSplatWrapper:
                 cmd += ["--seed", str(seed)]
             run_cwd = self.repo_dir
 
+        self.logger.info("infer_start", extra={"extra": {"cmd": cmd[:3] + ["..."]}})
+
         done = time_block()
         try:
             subprocess.run(cmd, cwd=run_cwd, check=True, timeout=timeout_s)
