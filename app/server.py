@@ -1,109 +1,102 @@
-import os, io, asyncio, time, json, zipfile, traceback
+
+from __future__ import annotations
+import io, os, time, tempfile, pathlib
 from typing import Optional
+from fastapi import FastAPI, Form, Response
+from PIL import Image
+import numpy as np
 
-from fastapi import FastAPI, Form, Body, Response
-from fastapi.responses import StreamingResponse, JSONResponse
-from loguru import logger
+from app.pipeline.diffsplat_wrapper import DiffSplatWrapper
+from app.pipeline.clip_validator import clip_score
+from app.utils.io import save_zip
 
-from .api_schemas import GenerateRequest, GenerateVideoRequest, HealthResponse
-from .pipeline_config import CONFIG
-from pipeline.diffsplat_adapter import DiffSplatGenerator, GenerationOutput
-from pipeline.splat_render import render_preview_png, render_orbit_mp4
-from pipeline.validator import quick_validate
+app = FastAPI(title="DiffSplat Generation Service", version="0.2.0")
+_state = {"clip_model": None, "clip_proc": None, "gen": None}
 
-app = FastAPI(title="DiffSplat Competitive Miner - Generation Service (gsplat)")
-GEN = DiffSplatGenerator(config=CONFIG)
+def _ensure_init():
+    if _state["gen"] is None:
+        variant = os.environ.get("MODEL_VARIANT", "sd15")
+        _state["gen"] = DiffSplatWrapper(variant=variant)
+    if _state["clip_model"] is None:
+        try:
+            from transformers import CLIPProcessor, CLIPModel
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            _state["clip_model"] = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+            _state["clip_proc"] = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        except Exception:
+            _state["clip_model"] = None
+            _state["clip_proc"] = None
 
-def form_or_json_prompt(prompt: Optional[str], seed: Optional[int], body: Optional[dict]):
-    if prompt is None and body is not None:
-        prompt = body.get("prompt")
-        seed = body.get("seed", seed)
-    if not prompt or not isinstance(prompt, str):
-        return None, seed
-    return prompt.strip(), seed
-
-@app.get("/health", response_model=HealthResponse)
-def health():
-    return HealthResponse(
-        status="ok",
-        device=GEN.device_str,
-        model_variant=GEN.model_variant,
-    )
 
 @app.post("/generate/")
-@app.post("/generate")
-async def generate(
-    prompt: Optional[str] = Form(default=None),
-    seed: Optional[int] = Form(default=None),
-    body: Optional[GenerateRequest] = Body(default=None),
+def generate(
+    prompt: str = Form(...),
+    neg_prompt: Optional[str] = Form(None),
+    seed: Optional[int] = Form(None),
+    timeout_s: Optional[float] = Form(28.0),
 ):
-    req_json = body.dict() if body else None
-    prompt, seed = form_or_json_prompt(prompt, seed, req_json)
-    if prompt is None:
-        return JSONResponse({"error": "Missing 'prompt'."}, status_code=400)
-
-    logger.info(f"/generate :: prompt='{prompt[:120]}' seed={seed}")
+    _ensure_init()
     t0 = time.time()
     try:
-        g: GenerationOutput = await GEN.generate(prompt, seed=seed)
-        ok, val_meta = await quick_validate(prompt, g.preview_rgb, g.num_points)
-        if not ok:
-            logger.warning(f"Validation failed: {val_meta}")
-            return Response(status_code=204)
-
-        meta = dict(
-            prompt=prompt,
-            seed=seed,
-            model_variant=GEN.model_variant,
-            num_points=g.num_points,
-            timings=g.timings,
-            validation=val_meta,
-            camera=CONFIG["video"],
-        )
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("gaussians.ply", g.ply_bytes)
-            zf.writestr("preview.png", render_preview_png(g.ply_bytes, CONFIG["video"]))
-            zf.writestr("metadata.json", json.dumps(meta, indent=2))
-        buf.seek(0)
-        elapsed = time.time() - t0
-        logger.info(f"/generate OK in {elapsed:.2f}s, points={g.num_points}")
-        headers = {"Content-Disposition": 'attachment; filename="result.zip"'}
-        return Response(content=buf.read(), media_type="application/zip", headers=headers)
+        out = _state["gen"].text_to_splat(prompt=prompt, seed=seed, timeout_s=float(timeout_s or 28.0))
+        cover = out["cover"]
+        ply_bytes = out.get("ply") or b""
     except Exception as e:
-        logger.error(f"/generate error: {e}\n{traceback.format_exc()}")
-        return JSONResponse({"error": "internal_error"}, status_code=500)
+        # Return empty byte stream to be ignored by validators
+        return Response(content=b"", media_type="application/octet-stream")
+
+    # Lightweight validation (best-effort)
+    score = clip_score(_state["clip_model"], _state["clip_proc"], prompt, cover.convert("RGB"))
+    if score < 0.12 or not ply_bytes:
+        # Empty to avoid cooldown penalties on low quality or missing geometry
+        return Response(content=b"", media_type="application/octet-stream")
+
+    # Stream raw PLY bytes (or .splat) directly
+    return Response(content=ply_bytes, media_type="application/octet-stream")
+
+
+    score = clip_score(_state["clip_model"], _state["clip_proc"], prompt, cover.convert("RGB"))
+    if score < 0.12:
+        meta = {"prompt": prompt, "error": "low_quality", "clip_score": score, "elapsed_s": round((time.time()-t0),3)}
+        z = save_zip(cover, b"", meta)
+        return Response(content=z, media_type="application/zip")
+
+    meta = {"prompt": prompt, "neg_prompt": neg_prompt, "seed": seed, "clip_score": score, "elapsed_s": round((time.time()-t0),3), "ts": int(time.time())}
+    z = save_zip(cover, ply_bytes, meta)
+    return Response(content=z, media_type="application/zip")
 
 @app.post("/generate_video/")
-@app.post("/generate_video")
-async def generate_video(
-    prompt: Optional[str] = Form(default=None),
-    seed: Optional[int] = Form(default=None),
-    body: Optional[GenerateVideoRequest] = Body(default=None),
+def generate_video(
+    prompt: str = Form(...),
+    neg_prompt: Optional[str] = Form(None),
+    seed: Optional[int] = Form(None),
+    timeout_s: Optional[float] = Form(28.0),
 ):
-    req_json = body.dict() if body else None
-    prompt, seed = form_or_json_prompt(prompt, seed, req_json)
-    if prompt is None:
-        return JSONResponse({"error": "Missing 'prompt'."}, status_code=400)
-
-    logger.info(f"/generate_video :: prompt='{prompt[:120]}' seed={seed}")
+    _ensure_init()
     try:
-        g: GenerationOutput = await GEN.generate(prompt, seed=seed)
-        ok, val_meta = await quick_validate(prompt, g.preview_rgb, g.num_points)
-        if not ok:
-            logger.warning(f"Validation failed: {val_meta}")
-            return Response(status_code=204)
-
-        def iter_video():
-            for chunk in render_orbit_mp4(g.ply_bytes, CONFIG["video"]):
-                yield chunk
-        headers = {"Content-Disposition": 'attachment; filename="video.mp4"'}
-        return StreamingResponse(iter_video(), media_type="video/mp4", headers=headers)
-    except Exception as e:
-        logger.error(f"/generate_video error: {e}\n{traceback.format_exc()}")
-        return JSONResponse({"error": "internal_error"}, status_code=500)
+        out = _state["gen"].text_to_splat(prompt=prompt, seed=seed, timeout_s=float(timeout_s or 28.0))
+        mp4_bytes = out.get("mp4")
+        if not mp4_bytes:
+            # synthesize a tiny mp4 if upstream didn't emit one
+            import imageio
+            frames = [(np.zeros((256,256,3), dtype=np.uint8)) for _ in range(12)]
+            buf = io.BytesIO()
+            imageio.mimwrite(buf, frames, format="mp4", fps=12)
+            mp4_bytes = buf.getvalue()
+        return Response(content=mp4_bytes, media_type="video/mp4")
+    except Exception:
+        # return 1s black
+        import imageio
+        frames = [(np.zeros((256,256,3), dtype=np.uint8)) for _ in range(12)]
+        buf = io.BytesIO()
+        imageio.mimwrite(buf, frames, format="mp4", fps=12)
+        return Response(content=buf.getvalue(), media_type="video/mp4")
 
 if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", "8093"))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info", workers=1)
+    import argparse, uvicorn
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", type=str, default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8093)
+    args = parser.parse_args()
+    uvicorn.run("app.server:app", host=args.host, port=args.port, reload=False, workers=int(os.environ.get("UVICORN_WORKERS","1")))

@@ -1,0 +1,6 @@
+model_variant: sd15
+export_format: splat
+turntable_seconds: 6
+fps: 12
+elevation_deg: 15
+radius: 1.6

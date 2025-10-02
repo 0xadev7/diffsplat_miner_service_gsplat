@@ -1,57 +1,55 @@
-# DiffSplat Competitive Miner — Generation Service (with **gsplat** renderer)
+# DiffSplat Competitive Generation Service
 
-Fast, *30s-or-less* text→3D Gaussian Splat generation service built around
-[DiffSplat (ICLR'25)](https://github.com/chenguolin/DiffSplat) with an
-**anisotropic 3D Gaussian** renderer powered by **[gsplat]** (CUDA-accelerated).
-It keeps **API parity** with the `generation` module in 404‑Repo's
-[three-gen-subnet](https://github.com/404-Repo/three-gen-subnet):
+Production-ready generation microservice built around **DiffSplat** with endpoints compatible with
+the *Three-Gen Subnet* miner's generation API.
 
-- `POST /generate/` → returns a `.zip` with `gaussians.ply`, `preview.png`, `metadata.json`
-- `POST /generate_video/` → streams `video/mp4` (orbit video)
+- Endpoints: `/generate/` and `/generate_video/`
+- Form-data interface: `prompt=...`
+- Self-validation: lightweight CLIP similarity
+- Background removal: optional BRIA RMBG v1.4 (commercial friendly); falls back gracefully
+- CUDA 12.4-ready Dockerfile including fixes for `glm/glm.hpp` and `uintptr_t` compile errors
+- Tuned for speed; designed to return within ~30s when models are preloaded
 
-**Renderer choice**
-- Prefers **gsplat** if available (fast, anisotropic, antialiased).
-- Falls back to **Open3D** point rendering if gsplat import fails.
+Port defaults to **8093** (as in the reference quick test).
 
----
-
-## Quick start
+## Docker Quickstart (CUDA 12.4)
 
 ```bash
-cd diffsplat_miner_service_gsplat
-bash ./setup_env.sh
-
-# (Optional) checkpoint warmup
-conda activate three-gen-mining
-python scripts/download_models.py
-
-# Run service (port 8093)
-python -m app.server
-
-# Or using PM2 like three-gen-subnet
-pm2 start generation.config.js
-```
-
-### Test
-
-```bash
+docker build -t diffsplat-gen:cuda124 .
+docker run --gpus all -p 8093:8093 -v $PWD/cache:/cache diffsplat-gen:cuda124
 curl -d "prompt=pink bicycle" -X POST http://127.0.0.1:8093/generate_video/ > video.mp4
-curl -d "prompt=purple treehouse" -X POST http://127.0.0.1:8093/generate/ --output result.zip
+curl -d "prompt=wooden chair" -X POST http://127.0.0.1:8093/generate/ --output result.zip
 ```
 
----
 
-## gsplat notes
+## No-Docker Install on RunPod
 
-- Install from PyPI (`pip install gsplat`) — it **JIT compiles CUDA on first import**.
-  This path is officially supported by the gsplat team. For wheels guidance and
-  extra flags see their docs.  
-- We feed **Graphdeco‑style PLY** (x,y,z, f_dc_*, f_rest_*, opacity, scale_*, rot_*).
-  For preview, we use **DC→RGB** (0.5 + C0·f_dc) and **sigmoid(opacity)**; scales are
-  **exp(scale)**; quaternions are taken as‑is (normalized by gsplat).
+```bash
+bash scripts/install_runpod.sh
+python -m app.server --host 0.0.0.0 --port 8093
+```
 
----
+## Using the Async Miner (fan-out + blacklist)
 
-## Self‑validation
+Provide a small JSON listing validator pull/push endpoints and any blacklisted UIDs, then:
 
-Same as before (CLIP+geometry+silhouette). On fail, return **HTTP 204** (empty).
+```python
+from app.pipeline.async_miner import AsyncMiner
+
+validators = [
+  {"uid": 101, "pull_url": "http://validator-101/pull", "push_url": "http://validator-101/push"},
+  {"uid": 180, "pull_url": "http://validator-180/pull", "push_url": "http://validator-180/push"},
+]
+miner = AsyncMiner(validators=validators, service_url="http://127.0.0.1:8093", blacklist=[180], workers=4)
+miner.run_forever()
+```
+
+
+### API Compatibility Update
+- `/generate/` now returns **raw PLY bytes** (`application/octet-stream`) exactly like the base miner.
+- `/generate_video/` returns `video/mp4`.
+
+Example:
+```bash
+curl -s -d "prompt=wooden chair" -X POST http://127.0.0.1:8093/generate/ > scene.ply
+```
